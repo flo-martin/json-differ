@@ -105,7 +105,7 @@ import Base from '../layouts/Base.astro';
                 class="filter-input"
                 placeholder=".path.to.show"
                 x-model="includeFilter"
-                @input="applyAndRender()"
+                @input="applyAndRender(); syncUrl()"
                 spellcheck="false"
                 autocomplete="off"
               />
@@ -117,7 +117,7 @@ import Base from '../layouts/Base.astro';
                 class="filter-input"
                 placeholder=".path.to.hide"
                 x-model="excludeFilter"
-                @input="applyAndRender()"
+                @input="applyAndRender(); syncUrl()"
                 spellcheck="false"
                 autocomplete="off"
               />
@@ -293,6 +293,20 @@ import Base from '../layouts/Base.astro';
     return realKeys.length ? out : undefined;
   }
 
+  function b64Encode(str) {
+    const bytes = new TextEncoder().encode(str);
+    let bin = '';
+    for (const b of bytes) bin += String.fromCharCode(b);
+    return btoa(bin);
+  }
+
+  function b64Decode(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder().decode(bytes);
+  }
+
   Alpine.data('jsonDiffer', () => ({
     leftFile: null,
     rightFile: null,
@@ -331,6 +345,7 @@ import Base from '../layouts/Base.astro';
             this.rightError = null;
           }
           if (this.canDiff) this.runDiff();
+          this.syncUrl();
         } catch (err) {
           if (side === 'left') {
             this.leftFile = null;
@@ -391,6 +406,44 @@ import Base from '../layouts/Base.astro';
       if (this.$refs.diffOutput) {
         showUnchanged(this.showUnchangedNodes, this.$refs.diffOutput);
       }
+      this.syncUrl();
+    },
+
+    init() {
+      this.loadFromUrl();
+    },
+
+    loadFromUrl() {
+      const hash = window.location.hash.slice(1);
+      if (!hash) return;
+      try {
+        const state = JSON.parse(b64Decode(hash));
+        if (state.p) this.includeFilter = state.p;
+        if (state.n) this.excludeFilter = state.n;
+        if (state.u) this.showUnchangedNodes = true;
+        if (state.a) {
+          try { this.leftFile = { name: 'file-a.json', parsed: JSON.parse(state.a) }; }
+          catch { this.leftError = 'Failed to restore File A from URL'; }
+        }
+        if (state.b) {
+          try { this.rightFile = { name: 'file-b.json', parsed: JSON.parse(state.b) }; }
+          catch { this.rightError = 'Failed to restore File B from URL'; }
+        }
+        if (this.canDiff) this.runDiff();
+      } catch {
+        // invalid or stale hash — ignore
+      }
+    },
+
+    syncUrl() {
+      const state = {};
+      if (this.leftFile) state.a = JSON.stringify(this.leftFile.parsed);
+      if (this.rightFile) state.b = JSON.stringify(this.rightFile.parsed);
+      if (this.includeFilter) state.p = this.includeFilter;
+      if (this.excludeFilter) state.n = this.excludeFilter;
+      if (this.showUnchangedNodes) state.u = true;
+      const hash = Object.keys(state).length ? b64Encode(JSON.stringify(state)) : '';
+      window.history.replaceState(null, '', hash ? `#${hash}` : window.location.pathname);
     },
   }));
 
