@@ -1,0 +1,398 @@
+---
+import Base from '../layouts/Base.astro';
+---
+
+<Base>
+  <div class="app" x-data="jsonDiffer">
+    <header>
+      <h1>JSON Differ</h1>
+      <p class="subtitle">Upload two JSON files to compare their structure</p>
+    </header>
+
+    <div class="panes">
+      <!-- Left pane -->
+      <div class="pane">
+        <div class="pane-header">
+          <span class="pane-label">File A</span>
+          <span class="pane-filename" x-show="leftFile" x-text="leftFile && leftFile.name"></span>
+        </div>
+        <div
+          class="upload-zone"
+          :class="{ dragging: leftDragging, loaded: leftFile, errored: leftError }"
+          @dragover.prevent="leftDragging = true"
+          @dragleave.prevent="leftDragging = false"
+          @drop.prevent="handleDrop('left', $event)"
+          @click="$refs.leftInput.click()"
+        >
+          <input
+            type="file"
+            accept=".json,application/json"
+            x-ref="leftInput"
+            @change="handleInput('left', $event)"
+            style="display:none"
+          />
+          <div x-show="!leftFile && !leftError" class="upload-prompt">
+            <div class="upload-icon">↑</div>
+            <p>Drop JSON file here</p>
+            <p class="hint">or click to browse</p>
+          </div>
+          <div x-show="leftFile" class="file-loaded">
+            <div class="check">✓</div>
+            <p class="loaded-name" x-text="leftFile && leftFile.name"></p>
+            <p class="hint" x-text="leftFile && filePreview(leftFile)"></p>
+          </div>
+          <div x-show="leftError" class="file-error">
+            <div class="error-icon">✗</div>
+            <p x-text="leftError"></p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right pane -->
+      <div class="pane">
+        <div class="pane-header">
+          <span class="pane-label">File B</span>
+          <span class="pane-filename" x-show="rightFile" x-text="rightFile && rightFile.name"></span>
+        </div>
+        <div
+          class="upload-zone"
+          :class="{ dragging: rightDragging, loaded: rightFile, errored: rightError }"
+          @dragover.prevent="rightDragging = true"
+          @dragleave.prevent="rightDragging = false"
+          @drop.prevent="handleDrop('right', $event)"
+          @click="$refs.rightInput.click()"
+        >
+          <input
+            type="file"
+            accept=".json,application/json"
+            x-ref="rightInput"
+            @change="handleInput('right', $event)"
+            style="display:none"
+          />
+          <div x-show="!rightFile && !rightError" class="upload-prompt">
+            <div class="upload-icon">↑</div>
+            <p>Drop JSON file here</p>
+            <p class="hint">or click to browse</p>
+          </div>
+          <div x-show="rightFile" class="file-loaded">
+            <div class="check">✓</div>
+            <p class="loaded-name" x-text="rightFile && rightFile.name"></p>
+            <p class="hint" x-text="rightFile && filePreview(rightFile)"></p>
+          </div>
+          <div x-show="rightError" class="file-error">
+            <div class="error-icon">✗</div>
+            <p x-text="rightError"></p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Waiting hint -->
+    <div x-show="(leftFile || rightFile) && !(leftFile && rightFile)" class="waiting">
+      Load the second file to compare
+    </div>
+
+    <!-- Diff output -->
+    <div x-show="diffHtml" class="diff-section">
+      <div class="diff-header">
+        <h2>Structural Diff</h2>
+        <div class="diff-controls">
+          <div class="filter-group">
+            <div class="filter-wrap filter-include">
+              <span class="filter-sign">+</span>
+              <input
+                type="text"
+                class="filter-input"
+                placeholder=".path.to.show"
+                x-model="includeFilter"
+                @input="applyAndRender()"
+                spellcheck="false"
+                autocomplete="off"
+              />
+            </div>
+            <div class="filter-wrap filter-exclude">
+              <span class="filter-sign">−</span>
+              <input
+                type="text"
+                class="filter-input"
+                placeholder=".path.to.hide"
+                x-model="excludeFilter"
+                @input="applyAndRender()"
+                spellcheck="false"
+                autocomplete="off"
+              />
+            </div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" x-model="showUnchangedNodes" @change="toggleUnchanged()" />
+            Show unchanged
+          </label>
+        </div>
+      </div>
+      <div x-ref="diffOutput" x-html="diffHtml" class="diff-output"></div>
+    </div>
+  </div>
+</Base>
+
+<script>
+  import Alpine from 'alpinejs';
+  import { diff } from 'jsondiffpatch';
+  import { format, showUnchanged } from 'jsondiffpatch/formatters/html';
+
+  function parsePath(str) {
+    if (!str) return [];
+    const trimmed = str.trim().replace(/^\./, '');
+    return trimmed ? trimmed.split('.').filter(Boolean) : [];
+  }
+
+  // Filter a plain value to only the given path (mirrors applyInclude but on raw values).
+  function includeLeftPath(val, parts) {
+    if (!parts.length) return val;
+    if (val === null || typeof val !== 'object') return undefined;
+    const [head, ...tail] = parts;
+    if (head === '#') {
+      if (Array.isArray(val)) return val.map(item => tail.length ? includeLeftPath(item, tail) : item);
+      const out = {};
+      for (const k of Object.keys(val)) {
+        const sub = tail.length ? includeLeftPath(val[k], tail) : val[k];
+        if (sub !== undefined) out[k] = sub;
+      }
+      return Object.keys(out).length ? out : undefined;
+    }
+    if (!(head in val)) return undefined;
+    if (!tail.length) return { [head]: val[head] };
+    const sub = includeLeftPath(val[head], tail);
+    return sub !== undefined ? { [head]: sub } : undefined;
+  }
+
+  // Remove a path from a plain value (mirrors applyExclude but on raw values).
+  function excludeLeftPath(val, parts) {
+    if (!parts.length) return val;
+    if (val === null || typeof val !== 'object') return val;
+    const [head, ...tail] = parts;
+    if (head === '#') {
+      if (Array.isArray(val)) return tail.length ? val.map(item => excludeLeftPath(item, tail)) : [];
+      if (!tail.length) return {};
+      const out = {};
+      for (const k of Object.keys(val)) out[k] = excludeLeftPath(val[k], tail);
+      return out;
+    }
+    if (!(head in val)) return val;
+    const out = { ...val };
+    if (!tail.length) {
+      delete out[head];
+    } else {
+      const sub = excludeLeftPath(val[head], tail);
+      if (sub === undefined) delete out[head];
+      else out[head] = sub;
+    }
+    return out;
+  }
+
+  // Navigate into a plain (non-delta) value by key path.
+  function getPath(val, parts) {
+    let cur = val;
+    for (const key of parts) {
+      if (key === '#' || cur === null || typeof cur !== 'object' || Array.isArray(cur)) return undefined;
+      if (!(key in cur)) return undefined;
+      cur = cur[key];
+    }
+    return cur;
+  }
+
+  // Keep only the subtree of delta at the given key path.
+  function applyInclude(delta, parts) {
+    if (!delta || typeof delta !== 'object') return delta;
+    if (!parts.length) return delta;
+
+    // Leaf delta — navigate INTO its values rather than returning the whole thing.
+    if (Array.isArray(delta)) {
+      if (delta.length === 1) {
+        // added: [newVal]
+        const sub = getPath(delta[0], parts);
+        return sub !== undefined ? [sub] : undefined;
+      }
+      if (delta.length === 3 && delta[1] === 0 && delta[2] === 0) {
+        // deleted: [oldVal, 0, 0]
+        const sub = getPath(delta[0], parts);
+        return sub !== undefined ? [sub, 0, 0] : undefined;
+      }
+      if (delta.length === 2) {
+        // whole-value replacement: [oldVal, newVal]
+        const subOld = getPath(delta[0], parts);
+        const subNew = getPath(delta[1], parts);
+        if (subOld !== undefined || subNew !== undefined) return [subOld ?? null, subNew ?? null];
+      }
+      return undefined;
+    }
+
+    // Object delta — navigate by key.
+    const [head, ...tail] = parts;
+    if (head === '#') {
+      const out = {};
+      if ('_t' in delta) out._t = delta._t;
+      for (const key of Object.keys(delta)) {
+        if (key === '_t') continue;
+        const sub = tail.length ? applyInclude(delta[key], tail) : delta[key];
+        if (sub !== undefined) out[key] = sub;
+      }
+      const realKeys = Object.keys(out).filter(k => k !== '_t');
+      return realKeys.length ? out : undefined;
+    }
+    if (!(head in delta)) return undefined;
+    if (!tail.length) {
+      const out = {};
+      if ('_t' in delta) out._t = delta._t;
+      out[head] = delta[head];
+      return out;
+    }
+    const sub = applyInclude(delta[head], tail);
+    if (sub === undefined) return undefined;
+    const out = {};
+    if ('_t' in delta) out._t = delta._t;
+    out[head] = sub;
+    return out;
+  }
+
+  // Remove the subtree of delta at the given key path.
+  function applyExclude(delta, parts) {
+    if (!delta || typeof delta !== 'object') return delta;
+    if (!parts.length) return undefined;
+
+    if (Array.isArray(delta)) {
+      // For leaf deltas, exclusion inside a leaf value isn't supported — return as-is.
+      return delta;
+    }
+
+    const [head, ...tail] = parts;
+    if (head === '#') {
+      if (!tail.length) return undefined;
+      const out = {};
+      if ('_t' in delta) out._t = delta._t;
+      for (const key of Object.keys(delta)) {
+        if (key === '_t') continue;
+        const sub = applyExclude(delta[key], tail);
+        if (sub !== undefined) out[key] = sub;
+      }
+      const realKeys = Object.keys(out).filter(k => k !== '_t');
+      return realKeys.length ? out : undefined;
+    }
+    if (!(head in delta)) return delta;
+    const out = { ...delta };
+    if (!tail.length) {
+      delete out[head];
+    } else {
+      const sub = applyExclude(delta[head], tail);
+      if (sub === undefined) {
+        delete out[head];
+      } else {
+        out[head] = sub;
+      }
+    }
+    const realKeys = Object.keys(out).filter(k => k !== '_t');
+    return realKeys.length ? out : undefined;
+  }
+
+  Alpine.data('jsonDiffer', () => ({
+    leftFile: null,
+    rightFile: null,
+    leftError: null,
+    rightError: null,
+    leftDragging: false,
+    rightDragging: false,
+    rawDelta: null,
+    diffHtml: null,
+    showUnchangedNodes: false,
+    includeFilter: '',
+    excludeFilter: '',
+
+    get canDiff() {
+      return this.leftFile !== null && this.rightFile !== null;
+    },
+
+    filePreview(file) {
+      const val = file.parsed;
+      if (Array.isArray(val)) return `Array — ${val.length} items`;
+      if (val !== null && typeof val === 'object') return `Object — ${Object.keys(val).length} keys`;
+      return typeof val;
+    },
+
+    readFile(side, file) {
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const parsed = JSON.parse(e.target.result);
+          if (side === 'left') {
+            this.leftFile = { name: file.name, parsed };
+            this.leftError = null;
+          } else {
+            this.rightFile = { name: file.name, parsed };
+            this.rightError = null;
+          }
+          if (this.canDiff) this.runDiff();
+        } catch (err) {
+          if (side === 'left') {
+            this.leftFile = null;
+            this.leftError = `Invalid JSON: ${err.message}`;
+          } else {
+            this.rightFile = null;
+            this.rightError = `Invalid JSON: ${err.message}`;
+          }
+        }
+      };
+      reader.readAsText(file);
+    },
+
+    handleInput(side, event) {
+      this.readFile(side, event.target.files[0]);
+    },
+
+    handleDrop(side, event) {
+      this[side === 'left' ? 'leftDragging' : 'rightDragging'] = false;
+      this.readFile(side, event.dataTransfer.files[0]);
+    },
+
+    runDiff() {
+      this.rawDelta = diff(this.leftFile.parsed, this.rightFile.parsed);
+      this.applyAndRender();
+    },
+
+    applyAndRender() {
+      // rawDelta === undefined means diff ran and files are identical
+      if (this.rawDelta === undefined) {
+        this.diffHtml = '<p class="no-diff">Files are identical — no differences found.</p>';
+        return;
+      }
+      // rawDelta === null means diff hasn't run yet
+      if (this.rawDelta === null) return;
+
+      let filtered = this.rawDelta;
+      const incParts = parsePath(this.includeFilter);
+      const excParts = parsePath(this.excludeFilter);
+      if (incParts.length) filtered = applyInclude(filtered, incParts);
+      if (filtered && excParts.length) filtered = applyExclude(filtered, excParts);
+
+      if (!filtered || Object.keys(filtered).filter(k => k !== '_t').length === 0) {
+        this.diffHtml = '<p class="no-diff">No changes match the current filter.</p>';
+        return;
+      }
+
+      let leftForFormat = this.leftFile.parsed;
+      if (incParts.length) leftForFormat = includeLeftPath(leftForFormat, incParts) ?? {};
+      if (excParts.length) leftForFormat = excludeLeftPath(leftForFormat, excParts) ?? {};
+      this.diffHtml = format(filtered, leftForFormat);
+      this.$nextTick(() => {
+        showUnchanged(this.showUnchangedNodes, this.$refs.diffOutput);
+      });
+    },
+
+    toggleUnchanged() {
+      if (this.$refs.diffOutput) {
+        showUnchanged(this.showUnchangedNodes, this.$refs.diffOutput);
+      }
+    },
+  }));
+
+  Alpine.start();
+</script>
